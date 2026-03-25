@@ -43,12 +43,23 @@ export class GitManager {
     logger.info(`Merged branch: ${branchName}`);
   }
 
-  /** Tag the current commit */
+  /** Tag the current commit — force-updates if the tag already exists */
   async tag(tagName: string, message?: string): Promise<void> {
-    if (message) {
-      await this.git.addAnnotatedTag(tagName, message);
-    } else {
-      await this.git.addTag(tagName);
+    try {
+      if (message) {
+        await this.git.addAnnotatedTag(tagName, message);
+      } else {
+        await this.git.addTag(tagName);
+      }
+    } catch {
+      // Tag already exists — force-update it
+      if (message) {
+        await this.git.raw(["tag", "-f", "-a", tagName, "-m", message]);
+      } else {
+        await this.git.raw(["tag", "-f", tagName]);
+      }
+      logger.info(`Re-tagged (forced): ${tagName}`);
+      return;
     }
     logger.info(`Tagged: ${tagName}`);
   }

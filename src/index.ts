@@ -26,12 +26,13 @@ program
 
 program
   .command("create")
-  .description("Create a new app project from a description")
+  .description("Create a new app project from a description (auto-resumes if already started)")
   .argument("<description>", "Natural-language description of the app to build")
   .option("-n, --name <name>", "Project name")
   .option("-o, --output <dir>", "Output directory")
   .option("-p, --provider <provider>", "LLM provider (openai | anthropic)")
   .option("-c, --config <path>", "Path to config file")
+  .option("--force", "Ignore existing state and start fresh")
   .action(async (description: string, options: Record<string, string>) => {
     try {
       const config = await loadConfig(options["config"]);
@@ -47,6 +48,53 @@ program
       );
 
       const pipeline = new Pipeline(outputDir, config, createAgent);
+
+      // Check whether a project already exists at this path
+      if (!options["force"]) {
+        const stateManager = new StateManager(outputDir);
+        const exists = await stateManager.load();
+
+        if (exists) {
+          const state = stateManager.getState();
+
+          console.log(chalk.bold.yellow(`\n⚡ Found existing project at this path\n`));
+          console.log(`  Project: ${chalk.bold(state.projectName)}`);
+          console.log(`  Stage:   ${chalk.bold(state.currentStage)}`);
+          console.log(`  Updated: ${state.updatedAt}`);
+
+          if (state.history.length > 0) {
+            console.log(chalk.bold("\n  Completed stages:"));
+            const completed = state.history.filter((h) => h.status === "completed");
+            const seen = new Set<string>();
+            for (const h of completed) {
+              if (!seen.has(h.stage)) {
+                seen.add(h.stage);
+                const tokens = h.result?.tokenUsage.totalTokens ?? 0;
+                const artifacts = h.result?.artifacts.length ?? 0;
+                console.log(
+                  chalk.green(`    ✓ ${h.stage.toUpperCase()}`) +
+                  chalk.gray(` — ${artifacts} artifacts, ${tokens} tokens`)
+                );
+              }
+            }
+          }
+
+          if (state.currentStage === "complete") {
+            console.log(chalk.bold.green("\n✅ This project is already complete!"));
+            console.log(chalk.gray(`  Use --force to rebuild from scratch.\n`));
+            return;
+          }
+
+          console.log(
+            chalk.cyan(`\n▶ Resuming from stage: ${chalk.bold(state.currentStage)}`)
+          );
+          console.log(chalk.gray(`  Use --force to start over.\n`));
+
+          await pipeline.resume();
+          return;
+        }
+      }
+
       await pipeline.create(projectName, description);
     } catch (err) {
       logger.error(chalk.red(`Failed: ${err}`));

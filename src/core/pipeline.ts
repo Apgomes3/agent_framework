@@ -268,8 +268,13 @@ export class Pipeline {
           await this.stateManager.save();
           return true;
         }
-        // Fix cycle succeeded — re-run QA to verify
-        continue;
+        // Fix cycle succeeded — QA already verified inside the cycle, advance stage
+        await this.git.commitAll(`[qa] QA passed after fixes — ${result.summary}`);
+        await this.git.tag(`v0.${STAGE_ORDER.indexOf(stage) + 1}-${stage}`);
+        const nextStageAfterFix = STAGE_ORDER[STAGE_ORDER.indexOf(stage) + 1];
+        this.stateManager.setStage(nextStageAfterFix);
+        await this.stateManager.save();
+        return true;
       }
 
       await this.stateManager.save();
