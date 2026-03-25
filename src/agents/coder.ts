@@ -113,7 +113,7 @@ export class CoderAgent extends Agent {
   }
 
   protected getLLMOptions(): LLMOptions {
-    return { temperature: 0.4, maxTokens: 16384, responseFormat: "json" };
+    return { maxTokens: 16384, responseFormat: "json" };
   }
 
   protected async parseResponse(

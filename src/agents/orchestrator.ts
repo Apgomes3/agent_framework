@@ -29,19 +29,19 @@ const SYSTEM_PROMPT = `You are a senior technical project manager and software a
 - "qa" — Quality tasks: test writing, code review, security audit, accessibility check
 
 ## Output format
-Return a JSON object with this exact structure:
+Return a **single** JSON object. Keep markdown string values concise (no excessive headings or bullet padding). The entire response must be valid, complete JSON:
 {
   "projectName": "string",
-  "projectSpec": "markdown string — full requirements doc",
-  "architectureDecision": "markdown string — tech decisions doc",
-  "riskAssessment": "markdown string — risks doc",
+  "projectSpec": "markdown string — key requirements only, max ~400 words",
+  "architectureDecision": "markdown string — tech decisions, max ~300 words",
+  "riskAssessment": "markdown string — top 5 risks with mitigations, max ~200 words",
   "taskBreakdown": {
     "projectName": "string",
     "tasks": [
       {
         "id": "task-001",
         "title": "string",
-        "description": "detailed description",
+        "description": "brief description",
         "assignee": "designer" | "coder" | "qa",
         "priority": "critical" | "high" | "medium" | "low",
         "status": "pending",
@@ -79,7 +79,7 @@ export class OrchestratorAgent extends Agent {
   }
 
   protected getLLMOptions(): LLMOptions {
-    return { temperature: 0.7, maxTokens: 8192, responseFormat: "json" };
+    return { temperature: 0.7, maxTokens: 16000, responseFormat: "json" };
   }
 
   protected async parseResponse(

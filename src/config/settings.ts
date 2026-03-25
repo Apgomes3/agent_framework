@@ -11,6 +11,7 @@ const DEFAULT_CONFIG: AgentFrameworkConfig = {
     provider: "openai",
     maxRetries: 3,
     outputDir: "./output",
+    projectsDir: "../projects",
   },
 };
 
@@ -36,7 +37,7 @@ export async function loadConfig(
   if (openaiKey) {
     config.providers.openai = {
       apiKey: openaiKey,
-      defaultModel: config.providers.openai?.defaultModel ?? "gpt-5.3-codex",
+      defaultModel: config.providers.openai?.defaultModel ?? "gpt-5.3-chat-latest",
     };
   }
 
@@ -54,13 +55,18 @@ export async function loadConfig(
     config.providers.gemini = {
       apiKey: geminiKey,
       defaultModel:
-        config.providers.gemini?.defaultModel ?? "gemini-3.1",
+        config.providers.gemini?.defaultModel ?? "gemini-3.1-pro-preview",
     };
   }
 
   const defaultProvider = process.env["DEFAULT_LLM_PROVIDER"] as LLMProvider | undefined;
   if (defaultProvider) {
     config.defaults.provider = defaultProvider;
+  }
+
+  const projectsDir = process.env["PROJECTS_DIR"];
+  if (projectsDir) {
+    config.defaults.projectsDir = projectsDir;
   }
 
   return config;

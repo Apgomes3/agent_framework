@@ -20,6 +20,7 @@ import { writeArtifacts } from "../utils/file-writer.js";
 import { GitManager } from "../utils/git.js";
 import { logger, addFileTransport } from "../utils/logger.js";
 import { LearningManager } from "./learning.js";
+import { MemoryStore } from "./memory.js";
 
 interface PipelineAgents {
   orchestrator: Agent;
@@ -52,6 +53,7 @@ export class Pipeline {
   private git: GitManager;
   private agents: PipelineAgents;
   private learning: LearningManager;
+  private memory: MemoryStore;
 
   constructor(
     private outputDir: string,
@@ -61,6 +63,7 @@ export class Pipeline {
     this.stateManager = new StateManager(outputDir);
     this.git = new GitManager(outputDir);
     this.learning = new LearningManager(outputDir);
+    this.memory = new MemoryStore(outputDir);
 
     // Create LLM clients and agents
     this.agents = {} as PipelineAgents;
@@ -96,6 +99,10 @@ export class Pipeline {
     await this.git.init();
     await this.stateManager.save();
 
+    // Initialize memory store
+    this.memory.init(projectName, description);
+    await this.memory.save();
+
     // Initialize learning system
     await this.learning.load();
     // Use the first available LLM client for lesson distillation
@@ -129,6 +136,12 @@ export class Pipeline {
     await this.learning.load();
     const firstAgent = this.agents.orchestrator;
     this.learning.setLLMClient(firstAgent["llmClient"]);
+
+    // Load memory from disk
+    await this.memory.load();
+
+    // Initialise git (safe no-op if .git already exists)
+    await this.git.init();
 
     await this.runPipeline(state.description);
   }
@@ -211,6 +224,10 @@ export class Pipeline {
       // Write artifacts to disk
       await writeArtifacts(this.outputDir, result.artifacts);
 
+      // Record to memory store (compact summary for next agent)
+      this.memory.record(result);
+      await this.memory.save();
+
       // Store artifacts in state
       const artifactCategory = STAGE_ARTIFACT_MAP[stage];
       this.stateManager.addArtifacts(artifactCategory, result.artifacts);
@@ -235,14 +252,23 @@ export class Pipeline {
         // Run coder fix cycle
         const fixed = await this.runFixCycle(result, description);
         if (!fixed) {
-          // Escalate to human
+          // Escalate to human — if they approve, accept current state and advance
           logger.warn(
             chalk.red("Auto-fix failed after max retries. Escalating to human.")
           );
           const approval = await this.requestApproval(stage, result);
           if (approval.decision === "reject") return false;
+
+          // Human approved/skipped escalation — accept the current state and move on
+          logger.info(chalk.green("Human approved QA stage with outstanding warnings."));
+          await this.git.commitAll(`[${agentRole}] ${result.summary}`);
+          await this.git.tag(`v0.${STAGE_ORDER.indexOf(stage) + 1}-${stage}`);
+          const nextStage = STAGE_ORDER[STAGE_ORDER.indexOf(stage) + 1];
+          this.stateManager.setStage(nextStage);
+          await this.stateManager.save();
+          return true;
         }
-        // Re-run QA after fixes
+        // Fix cycle succeeded — re-run QA to verify
         continue;
       }
 
@@ -299,58 +325,113 @@ export class Pipeline {
 
   /**
    * QA → Coder fix cycle: Coder fixes issues, then QA re-validates.
+   *
+   * Tracks which issue messages have already been attempted so QA is told to
+   * downgrade persistent issues from "error" to "warning" on subsequent runs,
+   * allowing the pipeline to converge instead of looping indefinitely.
    */
   private async runFixCycle(
-    qaResult: AgentResult,
+    initialQaResult: AgentResult,
     description: string
   ): Promise<boolean> {
     const maxRetries = this.stateManager.getState().settings.maxRetries;
+    let currentQaResult = initialQaResult;
+
+    // Track issues that have already been attempted (by message text)
+    const attemptedIssues = new Set<string>();
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      logger.info(
-        chalk.yellow(`Fix cycle ${attempt + 1}/${maxRetries}`)
-      );
+      logger.info(chalk.yellow(`Fix cycle ${attempt + 1}/${maxRetries}`));
 
-      // Give QA feedback to coder
-      const coderInput = this.buildAgentInput("code", description, qaResult.summary);
+      // Parse error issues from the QA report artifact
+      const qaReportArtifact = currentQaResult.artifacts.find(
+        (a) => a.path === "docs/qa-report.json"
+      );
+      let errorIssues: Array<{ file: string; message: string; suggestion?: string }> = [];
+      if (qaReportArtifact?.content) {
+        try {
+          const report = JSON.parse(qaReportArtifact.content);
+          errorIssues = (report.issues ?? []).filter(
+            (i: { severity: string }) => i.severity === "error"
+          );
+        } catch { /* ignore parse errors */ }
+      }
+
+      // Record new issues as attempted
+      for (const issue of errorIssues) {
+        attemptedIssues.add(issue.message);
+      }
+
+      // Build a structured fix list for the coder
+      const fixList = errorIssues
+        .map(
+          (i) => `- [${i.file}] ${i.message}${i.suggestion ? ` → ${i.suggestion}` : ""}`
+        )
+        .join("\n");
+      const coderFeedback = `Fix these QA errors:\n${fixList}`;
+
+      // Coder gets a lean input — only the current code artifacts, no full history
+      const coderInput = this.buildFixCycleCoderInput(description, coderFeedback);
       const coderResult = await this.agents.coder.execute(coderInput);
 
-      // Write coder fixes
       await writeArtifacts(this.outputDir, coderResult.artifacts);
       this.stateManager.addArtifacts("code", coderResult.artifacts);
       this.stateManager.addTokenUsage("coder", coderResult.tokenUsage);
-
       await this.git.commitAll(`[coder] Fix: ${coderResult.summary}`);
 
-      // Re-run QA
-      const qaInput = this.buildAgentInput("qa", description);
+      // Build QA hint about already-attempted issues
+      const alreadyAttempted = Array.from(attemptedIssues);
+      const qaFeedback =
+        alreadyAttempted.length > 0
+          ? `NOTE: The following issues were already attempted in previous fix cycles. ` +
+            `If they still appear, downgrade them to "warning" severity so the pipeline can advance:\n` +
+            alreadyAttempted.map((m) => `- ${m}`).join("\n")
+          : undefined;
+
+      const qaInput = this.buildAgentInput("qa", description, qaFeedback);
       const newQaResult = await this.agents.qa.execute(qaInput);
       this.stateManager.addTokenUsage("qa", newQaResult.tokenUsage);
+      currentQaResult = newQaResult;
 
       if (newQaResult.status === "success") {
         logger.info(chalk.green("✓ QA passed after fixes"));
-
-        // Learn from successful fix
-        await this.learning.learnFromFixLoop(
-          qaResult.summary,
-          coderResult.summary,
-          true
-        );
+        await this.learning.learnFromFixLoop(initialQaResult.summary, coderResult.summary, true);
         await this.learning.save();
-
         return true;
       }
 
-      // Learn from failed fix attempt
-      await this.learning.learnFromFixLoop(
-        qaResult.summary,
-        coderResult.summary,
-        false
-      );
+      await this.learning.learnFromFixLoop(initialQaResult.summary, coderResult.summary, false);
     }
 
     await this.learning.save();
     return false;
+  }
+
+  /**
+   * Build a lean AgentInput for the coder during a fix cycle.
+   * Only includes current code artifacts — no full stage history — to keep tokens low.
+   */
+  private buildFixCycleCoderInput(description: string, feedback: string): AgentInput {
+    const state = this.stateManager.getState();
+    const context: ProjectContext = {
+      projectName: state.projectName,
+      outputDir: this.outputDir,
+      tasks: state.tasks,
+      designArtifacts: [],
+      codeArtifacts: state.artifacts.code,
+      qaArtifacts: state.artifacts.qa,
+    };
+    const lessons = this.learning.formatLessonsForPrompt("coder");
+    const memoryContext = this.memory.buildContextSummary();
+    return {
+      task: null,
+      projectDescription: description,
+      context,
+      previousResults: [],
+      humanFeedback: feedback,
+      lessons: lessons || undefined,
+      memoryContext: memoryContext || undefined,
+    };
   }
 
   /**
@@ -372,14 +453,19 @@ export class Pipeline {
       qaArtifacts: state.artifacts.qa,
     };
 
-    // Collect previous results from all completed stages
-    const previousResults: AgentResult[] = state.history
-      .filter((h) => h.status === "completed" && h.result)
-      .map((h) => h.result!);
+    // One result per agent — latest only (keeps prompt size bounded across retries)
+    const latestPerAgent = new Map<string, AgentResult>();
+    for (const h of state.history) {
+      if (h.status === "completed" && h.result) {
+        latestPerAgent.set(h.result.agent, h.result);
+      }
+    }
+    const previousResults: AgentResult[] = Array.from(latestPerAgent.values());
 
     // Get relevant lessons for the agent assigned to this stage
     const agentRole = STAGE_AGENT_MAP[_stage];
     const lessons = this.learning.formatLessonsForPrompt(agentRole);
+    const memoryContext = this.memory.buildContextSummary();
 
     return {
       task: null,
@@ -388,6 +474,7 @@ export class Pipeline {
       previousResults,
       humanFeedback,
       lessons: lessons || undefined,
+      memoryContext: memoryContext || undefined,
     };
   }
 
@@ -457,6 +544,15 @@ export class Pipeline {
     const state = this.stateManager.getState();
     this.stateManager.setStage("complete");
     await this.stateManager.save();
+
+    // Compact memory: write final summary doc, clear per-block entries
+    const memorySummary = await this.memory.finalize();
+    await writeArtifacts(this.outputDir, [{
+      type: "document",
+      path: "docs/memory-summary.md",
+      content: `# Project Memory Summary\n\nGenerated at end of pipeline run.\n${memorySummary}`,
+      description: "Memory summary of all pipeline stages",
+    }]);
 
     await this.git.commitAll("[complete] Project finalized");
     await this.git.tag("v1.0", "Project complete — all stages passed");

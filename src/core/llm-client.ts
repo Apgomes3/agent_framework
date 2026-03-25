@@ -11,7 +11,7 @@ export class OpenAIClient implements LLMClient {
   private client: OpenAI;
   private defaultModel: string;
 
-  constructor(apiKey: string, defaultModel = "gpt-5.3-codex") {
+  constructor(apiKey: string, defaultModel = "gpt-5.3-chat-latest") {
     this.client = new OpenAI({ apiKey });
     this.defaultModel = defaultModel;
   }
@@ -23,8 +23,8 @@ export class OpenAIClient implements LLMClient {
     const response = await this.client.chat.completions.create({
       model,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens ?? 4096,
+      ...(options?.temperature !== undefined && { temperature: options.temperature }),
+      max_completion_tokens: options?.maxTokens ?? 8192,
       ...(options?.responseFormat === "json" && {
         response_format: { type: "json_object" },
       }),
@@ -73,13 +73,16 @@ export class AnthropicClient implements LLMClient {
         content: m.content,
       }));
 
-    const response = await this.client.messages.create({
+    // Always stream — Anthropic SDK requires streaming for high max_tokens
+    const stream = await this.client.messages.stream({
       model,
-      max_tokens: options?.maxTokens ?? 4096,
+      max_tokens: options?.maxTokens ?? 8192,
       temperature: options?.temperature ?? 0.7,
       ...(systemMessage && { system: systemMessage.content }),
       messages: chatMessages,
     });
+
+    const response = await stream.finalMessage();
 
     const textBlock = response.content.find((block) => block.type === "text");
     if (!textBlock || textBlock.type !== "text") {
@@ -105,7 +108,7 @@ export class GeminiClient implements LLMClient {
   private client: GoogleGenerativeAI;
   private defaultModel: string;
 
-  constructor(apiKey: string, defaultModel = "gemini-3.1") {
+  constructor(apiKey: string, defaultModel = "gemini-3.1-pro-preview") {
     this.client = new GoogleGenerativeAI(apiKey);
     this.defaultModel = defaultModel;
   }
@@ -118,7 +121,7 @@ export class GeminiClient implements LLMClient {
       model,
       generationConfig: {
         temperature: options?.temperature ?? 0.7,
-        maxOutputTokens: options?.maxTokens ?? 4096,
+        maxOutputTokens: options?.maxTokens ?? 8192,
         ...(options?.responseFormat === "json" && {
           responseMimeType: "application/json",
         }),

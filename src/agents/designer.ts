@@ -13,34 +13,45 @@ const SYSTEM_PROMPT = `You are a senior UI/UX designer specializing in React ent
 
 ## Your outputs
 
-1. **wireframes/** — HTML/CSS prototype files for each page/view. These should be self-contained HTML files that can be opened in a browser. Use clean, semantic HTML with inline CSS. Include navigation, forms, tables, and other UI elements as described. Use Fluent UI-inspired styling (clean lines, neutral colors, clear typography).
+1. **wireframes/** — Structured layout specs (JSON) for each main page/view. Describe the layout as regions and components — NOT HTML. Each wireframe is a JSON object like:
+{
+  "page": "POList",
+  "route": "/po",
+  "layout": "sidebar-main",
+  "regions": {
+    "header": { "components": ["PageTitle", "CreateButton", "SearchBar"] },
+    "main": { "components": ["DataTable:POTable", "Pagination"] },
+    "sidebar": { "components": ["FilterPanel"] }
+  },
+  "dataFields": ["id", "vendor", "amount", "status", "createdAt"],
+  "actions": ["create", "approve", "reject", "view"],
+  "notes": "Table has sortable columns. Status uses badge colors."
+}
 
 2. **component-tree.json** — Hierarchical component structure:
-   { "name": "App", "type": "layout", "description": "Root layout", "props": {}, "children": [...] }
-   Types: "page", "layout", "component", "hook", "store", "util"
+{ "name": "App", "type": "layout", "description": "Root layout", "props": {}, "children": [...] }
+Types: "page", "layout", "component", "hook", "store", "util"
 
-3. **design-tokens.json** — Theme configuration:
-   { "colors": {...}, "typography": { "fontFamily": "...", "fontSize": {...}, "fontWeight": {...} }, "spacing": {...}, "borderRadius": {...} }
+3. **design-tokens.json** — Theme:
+{ "colors": { "primary": "#...", "surface": "#...", "text": {...}, "status": {...} }, "typography": { "fontFamily": "...", "size": {...} }, "spacing": {...}, "borderRadius": {...} }
 
-4. **architecture-diagram.md** — Mermaid diagrams showing component relationships and data flow.
+4. **architecture-diagram.md** — One Mermaid diagram showing top-level component and page relationships.
 
 ## Output format
-Return JSON:
+Return a single complete valid JSON object. All values must be concise:
 {
   "wireframes": [
-    { "filename": "index.html", "content": "full HTML content", "description": "Home page" }
+    { "filename": "po-list.json", "content": "<JSON string of layout spec>", "description": "PO list page" }
   ],
   "componentTree": { ... },
   "designTokens": { ... },
-  "architectureDiagram": "markdown with mermaid blocks"
+  "architectureDiagram": "mermaid block"
 }
 
 ## Design principles
-- Clean, professional enterprise UI
-- Responsive layouts (flexbox/grid)
-- Accessible (ARIA labels, semantic HTML, color contrast)
-- Consistent spacing and typography
-- Fluent UI design language: neutral backgrounds, subtle borders, clear hierarchy`;
+- Fluent UI component library (DataGrid, CommandBar, Panel, Dialog, Pivot, MessageBar)
+- Role-based views (approver vs requester)
+- Accessible and consistent spacing`;
 
 export class DesignerAgent extends Agent {
   readonly role: AgentRole = "designer";
@@ -86,7 +97,7 @@ export class DesignerAgent extends Agent {
   }
 
   protected getLLMOptions(): LLMOptions {
-    return { temperature: 0.7, maxTokens: 8192, responseFormat: "json" };
+    return { temperature: 0.6, maxTokens: 16000, responseFormat: "json" };
   }
 
   protected async parseResponse(
@@ -97,13 +108,18 @@ export class DesignerAgent extends Agent {
 
     const artifacts: Artifact[] = [];
 
-    // Wireframes
+    // Wireframes (structured layout specs)
     if (json.wireframes && Array.isArray(json.wireframes)) {
       for (const wireframe of json.wireframes) {
+        // Content may be a string (JSON) or an object — normalise to string
+        const content =
+          typeof wireframe.content === "string"
+            ? wireframe.content
+            : JSON.stringify(wireframe.content, null, 2);
         artifacts.push({
           type: "file",
           path: `design/wireframes/${wireframe.filename}`,
-          content: wireframe.content,
+          content,
           description: wireframe.description,
         });
       }

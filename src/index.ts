@@ -43,7 +43,7 @@ program
       const projectName =
         options["name"] ?? slugify(description.slice(0, 50));
       const outputDir = resolve(
-        options["output"] ?? `./output/${projectName}`
+        options["output"] ?? `${config.defaults.projectsDir}/${projectName}`
       );
 
       const pipeline = new Pipeline(outputDir, config, createAgent);

@@ -9,73 +9,47 @@ import type {
   Stage,
 } from "../core/types.js";
 
-const SYSTEM_PROMPT = `You are a senior QA engineer specializing in TypeScript/React applications. Your job is to review generated code and produce:
+const SYSTEM_PROMPT = `You are a senior QA engineer specializing in TypeScript/React applications. Review generated code and produce a quality report.
 
-1. **Code Review** — Analyze each file for:
-   - TypeScript errors and type safety issues
-   - ESLint / code style violations
-   - Security vulnerabilities (OWASP Top 10: XSS, injection, auth issues, CSRF)
-   - Accessibility problems (missing ARIA, semantic HTML, color contrast)
-   - Best practice violations (error handling, loading states, input validation)
-   - Performance concerns (unnecessary re-renders, missing memoization)
+## Your outputs
 
-2. **Unit Tests** — Generate Vitest test files for:
-   - Utility functions
-   - Custom hooks (with renderHook)
-   - Zustand stores
-   - API service functions (with mocked fetch)
-   - Component rendering (with React Testing Library)
+1. **Issues list** — Flag bugs, security issues (OWASP Top 10), type errors, accessibility violations. Be concise: one line per issue.
 
-3. **E2E Tests** — Generate Playwright test files for critical user flows
+2. **Test stubs** — Generate SHORT Vitest test files (describe blocks with it() stubs and one real assertion each). Max 40 lines per test file. Focus on critical paths only.
 
-4. **QA Report** — Structured JSON report
+3. **One E2E test** — Single Playwright spec for the most critical user flow only. Max 50 lines.
 
-## Output format
-Return JSON:
+4. **Code review** — 3-5 sentences max overall assessment.
+
+## Output format — single complete valid JSON:
 {
   "passed": true | false,
   "issues": [
     {
       "id": "issue-001",
       "severity": "error" | "warning" | "info",
-      "category": "typescript" | "lint" | "security" | "accessibility" | "best-practice" | "test-failure",
+      "category": "typescript" | "security" | "accessibility" | "best-practice",
       "file": "src/App.tsx",
       "line": 42,
-      "message": "Description of the issue",
-      "suggestion": "How to fix it"
+      "message": "brief description",
+      "suggestion": "how to fix"
     }
   ],
   "testFiles": [
-    {
-      "path": "src/__tests__/App.test.tsx",
-      "content": "full test file content",
-      "description": "Tests for App component"
-    }
+    { "path": "src/__tests__/App.test.tsx", "content": "concise test stub", "description": "App tests" }
   ],
   "e2eTests": [
-    {
-      "path": "e2e/navigation.spec.ts",
-      "content": "full test file content",
-      "description": "Navigation e2e tests"
-    }
+    { "path": "e2e/critical.spec.ts", "content": "concise e2e test", "description": "Critical flow" }
   ],
-  "codeReview": "markdown string — detailed code review",
-  "testResults": {
-    "total": 0,
-    "passed": 0,
-    "failed": 0,
-    "skipped": 0
-  },
-  "summary": "Brief overall assessment"
+  "codeReview": "3-5 sentence review",
+  "testResults": { "total": 0, "passed": 0, "failed": 0, "skipped": 0 },
+  "summary": "one line summary"
 }
 
-## Severity guidelines
-- **error**: Must fix before shipping (security, crashes, data loss, type errors)
-- **warning**: Should fix (accessibility, missing error handling, bad patterns)
-- **info**: Nice to fix (style, minor optimizations)
-
-## Assessment
-Set "passed" to true if there are no "error" severity issues.`;
+## Rules
+- "passed": false only if there are "error" severity issues
+- Keep ALL string values short — this is a report, not a full implementation
+- Do not reproduce the entire source code in your response`;
 
 export class QAAgent extends Agent {
   readonly role: AgentRole = "qa";
@@ -115,28 +89,23 @@ export class QAAgent extends Agent {
       }
     }
 
-    // Include ALL generated code for review
-    const coderResult = input.previousResults.find(
-      (r) => r.agent === "coder"
-    );
+    // Include ALL generated code — deduplicated by path (latest wins)
+    const allCodeArtifacts = new Map<string, { content: string; path: string }>();
+    const coderResult = input.previousResults.find((r) => r.agent === "coder");
     if (coderResult) {
-      userContent += `## Generated Code (review all files)\n\n`;
-      for (const artifact of coderResult.artifacts) {
-        if (artifact.content) {
-          const ext = artifact.path.split(".").pop() ?? "";
-          userContent += `### ${artifact.path}\n\`\`\`${ext}\n${artifact.content}\n\`\`\`\n\n`;
-        }
+      for (const a of coderResult.artifacts) {
+        if (a.content) allCodeArtifacts.set(a.path, { path: a.path, content: a.content });
       }
     }
+    for (const a of input.context.codeArtifacts) {
+      if (a.content) allCodeArtifacts.set(a.path, { path: a.path, content: a.content });
+    }
 
-    // Also include any code artifacts written to state (from fix cycles)
-    if (input.context.codeArtifacts.length > 0) {
-      userContent += `## Additional Code Artifacts\n\n`;
-      for (const artifact of input.context.codeArtifacts) {
-        if (artifact.content) {
-          const ext = artifact.path.split(".").pop() ?? "";
-          userContent += `### ${artifact.path}\n\`\`\`${ext}\n${artifact.content}\n\`\`\`\n\n`;
-        }
+    if (allCodeArtifacts.size > 0) {
+      userContent += `## Code to Review\n\n`;
+      for (const artifact of allCodeArtifacts.values()) {
+        const ext = artifact.path.split(".").pop() ?? "";
+        userContent += `### ${artifact.path}\n\`\`\`${ext}\n${artifact.content}\n\`\`\`\n\n`;
       }
     }
 
@@ -149,7 +118,7 @@ export class QAAgent extends Agent {
   }
 
   protected getLLMOptions(): LLMOptions {
-    return { temperature: 0.3, maxTokens: 16384, responseFormat: "json" };
+    return { temperature: 0.3, maxTokens: 32000, responseFormat: "json" };
   }
 
   protected async parseResponse(

@@ -2,7 +2,7 @@
   "providers": {
     "openai": {
       "apiKey": "",
-      "defaultModel": "gpt-5.3-codex"
+      "defaultModel": "gpt-5.3-chat-latest"
     },
     "anthropic": {
       "apiKey": "",
@@ -10,18 +10,19 @@
     },
     "gemini": {
       "apiKey": "",
-      "defaultModel": "gemini-3.1"
+      "defaultModel": "gemini-3.1-pro-preview"
     }
   },
   "agentModels": {
     "orchestrator": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-    "designer": { "provider": "gemini", "model": "gemini-3.1" },
-    "coder": { "provider": "openai", "model": "gpt-5.3-codex" },
+    "designer": { "provider": "gemini", "model": "gemini-3.1-pro-preview" },
+    "coder": { "provider": "openai", "model": "gpt-5.3-chat-latest" },
     "qa": { "provider": "anthropic", "model": "claude-opus-4-20250514" }
   },
   "defaults": {
     "provider": "anthropic",
     "maxRetries": 3,
-    "outputDir": "./output"
+    "outputDir": "./output",
+    "projectsDir": "../projects"
   }
 }

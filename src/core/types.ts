@@ -78,6 +78,7 @@ export interface AgentInput {
   previousResults: AgentResult[];
   humanFeedback?: string;
   lessons?: string; // Formatted lessons from the learning system
+  memoryContext?: string; // Compact summary of completed stages (from MemoryStore)
 }
 
 export interface AgentResult {
@@ -212,6 +213,7 @@ export interface AgentFrameworkConfig {
     provider: LLMProvider;
     maxRetries: number;
     outputDir: string;
+    projectsDir: string;
   };
 }
 

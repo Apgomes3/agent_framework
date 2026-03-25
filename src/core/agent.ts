@@ -29,6 +29,14 @@ export abstract class Agent {
 
     const messages = this.buildMessages(input);
 
+    // Inject memory context (compact prior-stage summary) into the system prompt
+    if (input.memoryContext && messages.length > 0 && messages[0].role === "system") {
+      messages[0] = {
+        ...messages[0],
+        content: messages[0].content + input.memoryContext,
+      };
+    }
+
     // Inject lessons learned into the system prompt
     if (input.lessons && messages.length > 0 && messages[0].role === "system") {
       messages[0] = {
@@ -81,19 +89,78 @@ export abstract class Agent {
 
   /**
    * Helper to extract JSON from LLM response that may include markdown fencing.
+   * Also attempts to repair truncated JSON by closing open structures.
    */
   protected extractJSON(raw: string): string {
     // Strip ```json ... ``` blocks
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) return match[1].trim();
+    if (match) return this.repairJSON(match[1].trim());
 
     // Try to find raw JSON object/array
     const jsonStart = raw.indexOf("{");
     const jsonEnd = raw.lastIndexOf("}");
     if (jsonStart !== -1 && jsonEnd !== -1) {
-      return raw.slice(jsonStart, jsonEnd + 1);
+      return this.repairJSON(raw.slice(jsonStart, jsonEnd + 1));
     }
 
-    return raw.trim();
+    return this.repairJSON(raw.trim());
+  }
+
+  /**
+   * Attempt to repair truncated JSON by closing any unclosed structures.
+   */
+  private repairJSON(raw: string): string {
+    // First try as-is
+    try { JSON.parse(raw); return raw; } catch {}
+
+    // Truncate at the last complete top-level value before the truncation point
+    // by counting open braces/brackets and closing them
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let lastSafeEnd = -1;
+
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\" && inString) { escape = true; continue; }
+      if (ch === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{" || ch === "[") depth++;
+      else if (ch === "}" || ch === "]") {
+        depth--;
+        if (depth === 0) lastSafeEnd = i;
+      }
+    }
+
+    // If we have a safe end point, truncate there
+    if (lastSafeEnd > 0) {
+      const truncated = raw.slice(0, lastSafeEnd + 1);
+      try { JSON.parse(truncated); return truncated; } catch {}
+    }
+
+    // Last resort: close all open structures
+    const stack: string[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\" && inString) { escape = true; continue; }
+      if (ch === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") stack.push("}");
+      else if (ch === "[") stack.push("]");
+      else if (ch === "}" || ch === "]") stack.pop();
+    }
+
+    // If we ended mid-string, close it
+    let repaired = raw;
+    if (inString) repaired += '"';
+    // Close all open structures in reverse
+    repaired += stack.reverse().join("");
+
+    try { JSON.parse(repaired); return repaired; } catch {}
+
+    // Give up and return original
+    return raw;
   }
 }
