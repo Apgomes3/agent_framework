@@ -79,6 +79,7 @@ export class OrchestratorAgent extends Agent {
   readonly role: AgentRole = "orchestrator";
   readonly stage: Stage = "orchestrate";
   private interviewEnabled = true;
+  private cachedEnrichedDescription: string | null = null;
 
   /** Enable or disable the interactive interview phase */
   setInterviewMode(enabled: boolean): void {
@@ -87,11 +88,20 @@ export class OrchestratorAgent extends Agent {
 
   /**
    * Override execute to optionally run an interview phase first.
+   * Caches the enriched description so retries don't re-ask interview questions.
    */
   override async execute(input: AgentInput): Promise<AgentResult> {
     // Only interview on first run (no humanFeedback = not a retry)
     if (this.interviewEnabled && !input.humanFeedback) {
+      if (this.cachedEnrichedDescription) {
+        // Reuse answers from a previous interview (retry scenario)
+        logger.info(`[${this.role}] Reusing cached interview answers from previous attempt`);
+        const reusedInput = { ...input, projectDescription: this.cachedEnrichedDescription };
+        return super.execute(reusedInput);
+      }
       const enrichedInput = await this.runInterview(input);
+      // Cache the enriched description for retries
+      this.cachedEnrichedDescription = enrichedInput.projectDescription;
       return super.execute(enrichedInput);
     }
     return super.execute(input);
