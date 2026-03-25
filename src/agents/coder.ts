@@ -19,7 +19,7 @@ const SYSTEM_PROMPT = `You are a senior full-stack TypeScript developer. Your jo
 ## Code quality rules
 - Strict TypeScript (no \`any\`)
 - Functional components with hooks only
-- **Every page/component file must have a `export default` — never use only named exports for components imported in routing or App.tsx**
+- Every page/component file must have a default export — never use only named exports for components imported in routing or App.tsx
 - Proper error boundaries
 - Loading and error states for async operations
 - Accessible markup (semantic HTML, ARIA)
