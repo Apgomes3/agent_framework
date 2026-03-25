@@ -98,6 +98,7 @@ export interface ProjectContext {
   designArtifacts: Artifact[];
   codeArtifacts: Artifact[];
   qaArtifacts: Artifact[];
+  techStackId?: string; // Resolved tech stack ID
 }
 
 // ── QA Report ──────────────────────────────────────────────
@@ -105,7 +106,7 @@ export interface ProjectContext {
 export const QAIssueSchema = z.object({
   id: z.string(),
   severity: z.enum(["error", "warning", "info"]),
-  category: z.enum(["typescript", "lint", "security", "accessibility", "best-practice", "test-failure"]),
+  category: z.enum(["typescript", "lint", "security", "accessibility", "best-practice", "test-failure", "build-failure"]),
   file: z.string(),
   line: z.number().optional(),
   message: z.string(),
@@ -214,6 +215,7 @@ export interface AgentFrameworkConfig {
     maxRetries: number;
     outputDir: string;
     projectsDir: string;
+    stack?: string; // Tech stack ID (e.g., "react-fluent", "nextjs", "vue-fastify")
   };
 }
 

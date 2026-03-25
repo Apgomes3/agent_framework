@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import inquirer from "inquirer";
 import chalk from "chalk";
@@ -18,6 +19,7 @@ import { createLLMClient } from "./llm-client.js";
 import { resolveProviderConfig } from "../config/settings.js";
 import { writeArtifacts } from "../utils/file-writer.js";
 import { GitManager } from "../utils/git.js";
+import { runCommand } from "../utils/process-runner.js";
 import { logger, addFileTransport } from "../utils/logger.js";
 import { LearningManager } from "./learning.js";
 import { MemoryStore } from "./memory.js";
@@ -183,6 +185,16 @@ export class Pipeline {
 
     let humanFeedback: string | undefined;
 
+    // Run real build verification before QA so it gets actual compiler errors
+    let buildErrors: string | undefined;
+    if (stage === "qa") {
+      const buildResult = await this.runBuildVerification();
+      if (!buildResult.passed) {
+        buildErrors = buildResult.errors;
+        logger.info(chalk.yellow("Build verification found errors — including in QA input"));
+      }
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
         logger.info(chalk.yellow(`Retry ${attempt}/${maxRetries}...`));
@@ -192,7 +204,8 @@ export class Pipeline {
       this.stateManager.startStageExecution(stage, agentRole);
 
       // Build agent input
-      const input = this.buildAgentInput(stage, description, humanFeedback);
+      const combinedFeedback = [humanFeedback, buildErrors].filter(Boolean).join("\n\n") || undefined;
+      const input = this.buildAgentInput(stage, description, combinedFeedback);
 
       // Execute agent
       let result: AgentResult;
@@ -293,6 +306,11 @@ export class Pipeline {
           await this.git.commitAll(`[${agentRole}] ${result.summary}`);
           await this.git.tag(`v0.${STAGE_ORDER.indexOf(stage) + 1}-${stage}`);
 
+          // Auto npm-install after code stage so QA can run real builds
+          if (stage === "code") {
+            await this.npmInstall();
+          }
+
           // Advance to next stage
           const nextStage = STAGE_ORDER[STAGE_ORDER.indexOf(stage) + 1];
           this.stateManager.setStage(nextStage);
@@ -384,14 +402,26 @@ export class Pipeline {
       this.stateManager.addTokenUsage("coder", coderResult.tokenUsage);
       await this.git.commitAll(`[coder] Fix: ${coderResult.summary}`);
 
+      // Re-install deps in case the coder updated package.json
+      await this.npmInstall();
+
+      // Run build verification and include errors in QA feedback
+      const fixBuildResult = await this.runBuildVerification();
+      const fixBuildErrors = fixBuildResult.passed ? undefined : fixBuildResult.errors;
+
       // Build QA hint about already-attempted issues
       const alreadyAttempted = Array.from(attemptedIssues);
       const qaFeedback =
-        alreadyAttempted.length > 0
-          ? `NOTE: The following issues were already attempted in previous fix cycles. ` +
-            `If they still appear, downgrade them to "warning" severity so the pipeline can advance:\n` +
-            alreadyAttempted.map((m) => `- ${m}`).join("\n")
-          : undefined;
+        [
+          alreadyAttempted.length > 0
+            ? `NOTE: The following issues were already attempted in previous fix cycles. ` +
+              `If they still appear, downgrade them to "warning" severity so the pipeline can advance:\n` +
+              alreadyAttempted.map((m) => `- ${m}`).join("\n")
+            : undefined,
+          fixBuildErrors,
+        ]
+          .filter(Boolean)
+          .join("\n\n") || undefined;
 
       const qaInput = this.buildAgentInput("qa", description, qaFeedback);
       const newQaResult = await this.agents.qa.execute(qaInput);
@@ -425,6 +455,7 @@ export class Pipeline {
       designArtifacts: [],
       codeArtifacts: state.artifacts.code,
       qaArtifacts: state.artifacts.qa,
+      techStackId: this.config.defaults.stack,
     };
     const lessons = this.learning.formatLessonsForPrompt("coder");
     const memoryContext = this.memory.buildContextSummary();
@@ -456,6 +487,7 @@ export class Pipeline {
       designArtifacts: state.artifacts.design,
       codeArtifacts: state.artifacts.code,
       qaArtifacts: state.artifacts.qa,
+      techStackId: this.config.defaults.stack,
     };
 
     // One result per agent — latest only (keeps prompt size bounded across retries)
@@ -591,5 +623,81 @@ export class Pipeline {
     }
 
     await this.learning.save();
+  }
+
+  // ── Post-code: npm install ─────────────────────────────────
+
+  /**
+   * Run `npm install` in the project directory after the code stage writes
+   * artifacts. Ensures node_modules are present before QA runs any build
+   * verification. Skips gracefully if no package.json exists.
+   */
+  private async npmInstall(): Promise<boolean> {
+    const pkgPath = join(this.outputDir, "package.json");
+    if (!existsSync(pkgPath)) {
+      logger.debug("No package.json found — skipping npm install");
+      return true;
+    }
+
+    logger.info(chalk.cyan("\n📦 Running npm install…"));
+    const result = await runCommand("npm install", this.outputDir, 180_000);
+
+    if (result.exitCode !== 0) {
+      logger.warn(chalk.yellow(`npm install exited with code ${result.exitCode}`));
+      if (result.stderr) logger.warn(result.stderr.slice(0, 2000));
+      return false;
+    }
+
+    logger.info(chalk.green("✓ npm install succeeded"));
+    return true;
+  }
+
+  // ── Build verification ────────────────────────────────────
+
+  /**
+   * Run `tsc --noEmit` and `npm run build` in the project directory.
+   * Returns a structured error summary that can be fed into QA/Coder prompts.
+   * If the project has no tsconfig or build script, the respective check is skipped.
+   */
+  private async runBuildVerification(): Promise<{ passed: boolean; errors: string }> {
+    const errors: string[] = [];
+
+    // TypeScript type-check
+    const hasTsConfig = existsSync(join(this.outputDir, "tsconfig.json"));
+    if (hasTsConfig) {
+      logger.info(chalk.cyan("🔍 Running tsc --noEmit…"));
+      const tsc = await runCommand("npx tsc --noEmit 2>&1", this.outputDir, 120_000);
+      if (tsc.exitCode !== 0) {
+        const tscErrors = (tsc.stdout + tsc.stderr).trim();
+        errors.push(`## TypeScript errors\n\`\`\`\n${tscErrors.slice(0, 4000)}\n\`\`\``);
+        logger.warn(chalk.yellow(`tsc --noEmit failed (exit ${tsc.exitCode})`));
+      } else {
+        logger.info(chalk.green("✓ tsc --noEmit passed"));
+      }
+    }
+
+    // Vite / build
+    const pkgPath = join(this.outputDir, "package.json");
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse((await import("node:fs")).readFileSync(pkgPath, "utf-8"));
+        if (pkg.scripts?.build) {
+          logger.info(chalk.cyan("🔨 Running npm run build…"));
+          const build = await runCommand("npm run build 2>&1", this.outputDir, 180_000);
+          if (build.exitCode !== 0) {
+            const buildOut = (build.stdout + build.stderr).trim();
+            errors.push(`## Build errors\n\`\`\`\n${buildOut.slice(0, 4000)}\n\`\`\``);
+            logger.warn(chalk.yellow(`npm run build failed (exit ${build.exitCode})`));
+          } else {
+            logger.info(chalk.green("✓ npm run build passed"));
+          }
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    if (errors.length === 0) {
+      return { passed: true, errors: "" };
+    }
+    return { passed: false, errors: errors.join("\n\n") };
   }
 }

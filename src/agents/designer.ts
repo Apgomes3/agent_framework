@@ -8,6 +8,7 @@ import type {
   LLMOptions,
   Stage,
 } from "../core/types.js";
+import { getTechStack } from "../core/tech-stacks.js";
 
 const SYSTEM_PROMPT = `You are a senior UI/UX designer specializing in React enterprise applications with Fluent UI. Your job is to produce design artifacts from a project spec and task breakdown.
 
@@ -58,8 +59,12 @@ export class DesignerAgent extends Agent {
   readonly stage: Stage = "design";
 
   protected buildMessages(input: AgentInput): LLMMessage[] {
+    // Append stack-specific design hints
+    const stack = getTechStack(input.context.techStackId);
+    const systemContent = SYSTEM_PROMPT + `\n\n## Tech-Specific Design Guidance\n${stack.designerHints}`;
+
     const messages: LLMMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: systemContent },
     ];
 
     let userContent = `## Project: ${input.context.projectName}\n\n`;

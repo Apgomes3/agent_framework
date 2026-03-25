@@ -1,5 +1,7 @@
 import { Agent } from "../core/agent.js";
 import { TaskBreakdownSchema } from "../core/types.js";
+import inquirer from "inquirer";
+import chalk from "chalk";
 import type {
   AgentInput,
   AgentResult,
@@ -9,6 +11,8 @@ import type {
   LLMOptions,
   Stage,
 } from "../core/types.js";
+import { logger } from "../utils/logger.js";
+import { getTechStack } from "../core/tech-stacks.js";
 
 const SYSTEM_PROMPT = `You are a senior technical project manager and software architect. Your job is to take a high-level app description and produce:
 
@@ -17,11 +21,10 @@ const SYSTEM_PROMPT = `You are a senior technical project manager and software a
 3. **architecture-decision.md** — Tech stack choices, API structure, data model, component architecture.
 4. **risk-assessment.md** — Identified risks and mitigations.
 
-## Tech Stack (default for generated apps)
-- Frontend: React 19, TypeScript, Vite, Fluent UI (@fluentui/react-components), Zustand (state), React Hook Form + Zod (forms), TanStack Query (data fetching), React Router DOM
-- Styling: CSS Modules or Tailwind CSS
-- Testing: Vitest (unit), Playwright (e2e)
-- API: Express.js or Fastify with TypeScript, Zod validation
+## Tech Stack
+The tech stack for this project will be resolved at runtime. The user has selected a specific stack.
+Plan tasks and architecture using the stack identified in the user message.
+When the user doesn't specify, use the default.
 
 ## Task assignment rules
 - "designer" — UI/UX tasks: wireframes, component tree, design tokens, page layouts
@@ -52,16 +55,107 @@ Return a **single** JSON object. Keep markdown string values concise (no excessi
   }
 }`;
 
+const INTERVIEW_PROMPT = `You are a senior technical project manager. Given a brief app description, generate 3-5 clarifying questions to ask the user BEFORE starting project planning.
+
+Focus on questions that would significantly change the architecture or scope:
+- Authentication/authorization requirements
+- Data model assumptions (what entities, what relationships)
+- Tech preference overrides (e.g., "use Next.js instead of Vite")
+- Deployment target (SPA, SSR, desktop)
+- Integration points (third-party APIs, databases)
+- Scale expectations
+
+Return JSON:
+{
+  "questions": [
+    { "id": "q1", "question": "Do you need user authentication? If so, what type (email/password, OAuth, SSO)?", "default": "Email/password with JWT" },
+    { "id": "q2", "question": "...", "default": "..." }
+  ]
+}
+
+Do NOT ask trivial questions. Skip questions whose answers are obvious from the description.`;
+
 export class OrchestratorAgent extends Agent {
   readonly role: AgentRole = "orchestrator";
   readonly stage: Stage = "orchestrate";
+  private interviewEnabled = true;
+
+  /** Enable or disable the interactive interview phase */
+  setInterviewMode(enabled: boolean): void {
+    this.interviewEnabled = enabled;
+  }
+
+  /**
+   * Override execute to optionally run an interview phase first.
+   */
+  override async execute(input: AgentInput): Promise<AgentResult> {
+    // Only interview on first run (no humanFeedback = not a retry)
+    if (this.interviewEnabled && !input.humanFeedback) {
+      const enrichedInput = await this.runInterview(input);
+      return super.execute(enrichedInput);
+    }
+    return super.execute(input);
+  }
+
+  private async runInterview(input: AgentInput): Promise<AgentInput> {
+    logger.info(`[${this.role}] Running user interview...`);
+
+    const messages: LLMMessage[] = [
+      { role: "system", content: INTERVIEW_PROMPT },
+      { role: "user", content: `App description: ${input.projectDescription}` },
+    ];
+
+    let questions: Array<{ id: string; question: string; default: string }> = [];
+    try {
+      const response = await this.llmClient.chat(messages, {
+        temperature: 0.5,
+        maxTokens: 2048,
+        responseFormat: "json",
+      });
+      const parsed = JSON.parse(this.extractJSON(response.content));
+      questions = parsed.questions ?? [];
+    } catch (err) {
+      logger.warn(`Interview question generation failed: ${err}`);
+      return input;
+    }
+
+    if (questions.length === 0) return input;
+
+    console.log(chalk.bold.cyan("\n━━━ Project Clarification Questions ━━━\n"));
+    console.log(chalk.gray("Answer to refine the project plan. Press Enter to accept defaults.\n"));
+
+    const answers: string[] = [];
+    for (const q of questions) {
+      const { answer } = await inquirer.prompt<{ answer: string }>([
+        {
+          type: "input",
+          name: "answer",
+          message: q.question,
+          default: q.default,
+        },
+      ]);
+      answers.push(`Q: ${q.question}\nA: ${answer}`);
+    }
+
+    // Enrich the project description with interview answers
+    const enrichedDescription =
+      input.projectDescription +
+      "\n\n## User Clarifications\n" +
+      answers.join("\n\n");
+
+    console.log(chalk.green("\n✓ Interview complete — proceeding with planning\n"));
+
+    return { ...input, projectDescription: enrichedDescription };
+  }
 
   protected buildMessages(input: AgentInput): LLMMessage[] {
     const messages: LLMMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
     ];
 
-    let userContent = `## App Description\n\n${input.projectDescription}`;
+    const stack = getTechStack(input.context.techStackId);
+    let userContent = `## Tech Stack: ${stack.name}\n\n`;
+    userContent += `## App Description\n\n${input.projectDescription}`;
 
     if (input.humanFeedback) {
       userContent += `\n\n## Feedback from Review\n\nPlease incorporate this feedback:\n${input.humanFeedback}`;

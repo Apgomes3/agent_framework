@@ -23,6 +23,7 @@
     "provider": "anthropic",
     "maxRetries": 3,
     "outputDir": "./output",
-    "projectsDir": "../projects"
+    "projectsDir": "../projects",
+    "stack": "react-fluent"
   }
 }

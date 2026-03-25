@@ -33,6 +33,8 @@ program
   .option("-p, --provider <provider>", "LLM provider (openai | anthropic)")
   .option("-c, --config <path>", "Path to config file")
   .option("--force", "Ignore existing state and start fresh")
+  .option("--no-interview", "Skip orchestrator interview questions")
+  .option("-s, --stack <stack>", "Tech stack (react-fluent | nextjs | vue-fastify)", "react-fluent")
   .action(async (description: string, options: Record<string, string>) => {
     try {
       const config = await loadConfig(options["config"]);
@@ -41,13 +43,26 @@ program
         config.defaults.provider = options["provider"] as "openai" | "anthropic";
       }
 
+      if (options["stack"]) {
+        config.defaults.stack = options["stack"];
+      }
+
       const projectName =
         options["name"] ?? slugify(description.slice(0, 50));
       const outputDir = resolve(
         options["output"] ?? `${config.defaults.projectsDir}/${projectName}`
       );
 
-      const pipeline = new Pipeline(outputDir, config, createAgent);
+      const noInterview = (options as Record<string, unknown>)["interview"] === false;
+      const agentFactory = (role: AgentRole, llmClient: LLMClient): Agent => {
+        const agent = createAgent(role, llmClient);
+        if (role === "orchestrator" && noInterview) {
+          (agent as OrchestratorAgent).setInterviewMode(false);
+        }
+        return agent;
+      };
+
+      const pipeline = new Pipeline(outputDir, config, agentFactory);
 
       // Check whether a project already exists at this path
       if (!options["force"]) {
