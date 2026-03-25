@@ -56,6 +56,7 @@ export class Pipeline {
   private agents: PipelineAgents;
   private learning: LearningManager;
   private memory: MemoryStore;
+  private abortController: AbortController;
 
   constructor(
     private outputDir: string,
@@ -66,6 +67,7 @@ export class Pipeline {
     this.git = new GitManager(outputDir);
     this.learning = new LearningManager(outputDir);
     this.memory = new MemoryStore(outputDir);
+    this.abortController = new AbortController();
 
     // Create LLM clients and agents
     this.agents = {} as PipelineAgents;
@@ -150,8 +152,26 @@ export class Pipeline {
 
   /**
    * Main pipeline loop — runs stages sequentially with human approval.
+   * Registers a SIGINT handler to save state before exiting.
    */
   private async runPipeline(description: string): Promise<void> {
+    // Graceful shutdown: save state on Ctrl+C so the project can be resumed
+    const onSigint = async () => {
+      console.log(chalk.yellow("\n\n⚠ Interrupted — saving state before exit…"));
+      this.abortController.abort();
+      try {
+        await this.stateManager.save();
+        await this.learning.save();
+        await this.memory.save();
+        console.log(chalk.green("State saved. Resume with: agent-framework resume <dir>"));
+      } catch (err) {
+        console.error("Failed to save state on exit:", err);
+      }
+      process.exit(130);
+    };
+    process.on("SIGINT", onSigint);
+
+    try {
     const state = this.stateManager.getState();
     const startIndex = STAGE_ORDER.indexOf(state.currentStage);
 
@@ -167,6 +187,9 @@ export class Pipeline {
         logger.error(chalk.red(`Pipeline halted at stage: ${stage}`));
         return;
       }
+    }
+    } finally {
+      process.removeListener("SIGINT", onSigint);
     }
   }
 

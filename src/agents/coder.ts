@@ -100,7 +100,7 @@ export class CoderAgent extends Agent {
     const planResponse = await this.llmClient.chat(planMessages, { maxTokens: 8192, responseFormat: "json" });
     this.addUsage(totalUsage, planResponse.usage);
 
-    const plan = JSON.parse(this.extractJSON(planResponse.content));
+    const plan = this.parseJSONFromLLM(planResponse.content, "Phase 1: plan+scaffold");
 
     // Collect scaffold files from Phase 1
     if (plan.files && Array.isArray(plan.files)) {
@@ -123,7 +123,7 @@ export class CoderAgent extends Agent {
       const batchResponse = await this.llmClient.chat(batchMessages, { maxTokens: 16384, responseFormat: "json" });
       this.addUsage(totalUsage, batchResponse.usage);
 
-      const batchJson = JSON.parse(this.extractJSON(batchResponse.content));
+      const batchJson = this.parseJSONFromLLM(batchResponse.content, `Phase 2: batch ${batch.name}`);
       if (batchJson.files && Array.isArray(batchJson.files)) {
         for (const file of batchJson.files) {
           allArtifacts.push({ type: "file", path: file.path, content: file.content, description: file.description ?? "" });
@@ -170,11 +170,12 @@ export class CoderAgent extends Agent {
     messages.push({ role: "user", content: userContent });
 
     const response = await this.llmClient.chat(messages, { maxTokens: 16384, responseFormat: "json" });
-    const json = JSON.parse(this.extractJSON(response.content));
+    const json = this.parseJSONFromLLM(response.content, "incremental fix");
 
     const artifacts: Artifact[] = [];
-    if (json.files && Array.isArray(json.files)) {
-      for (const file of json.files) {
+    const files = json.files as Array<{ path: string; content: string; description?: string }> | undefined;
+    if (files && Array.isArray(files)) {
+      for (const file of files) {
         artifacts.push({ type: "file", path: file.path, content: file.content, description: file.description ?? "" });
       }
     }
@@ -325,14 +326,18 @@ export class CoderAgent extends Agent {
   }
 
   /**
-   * Extract file paths mentioned in QA feedback (e.g., "[src/App.tsx]")
+   * Extract file paths mentioned in QA feedback (e.g., "[src/App.tsx]" or "[src/types/index.d.ts]")
    */
   private extractFilesFromFeedback(feedback: string): string[] {
     const paths = new Set<string>();
-    const regex = /\[([^\]]+\.\w+)\]/g;
+    const regex = /\[([^\]]+(?:\.[a-zA-Z][\w.]*)?)\]/g;
     let match;
     while ((match = regex.exec(feedback)) !== null) {
-      paths.add(match[1]);
+      const candidate = match[1];
+      // Must look like a file path (contains a dot-extension segment)
+      if (/\.[a-zA-Z]\w*$/.test(candidate)) {
+        paths.add(candidate);
+      }
     }
     return Array.from(paths);
   }
@@ -351,8 +356,8 @@ export class CoderAgent extends Agent {
         try {
           const content = await readFile(fullPath, "utf-8");
           results.push({ path: relPath, content });
-        } catch {
-          // skip unreadable files
+        } catch (err) {
+          logger.warn(`[${this.role}] Could not read file ${relPath}: ${(err as Error).message}`);
         }
       }
     }
@@ -415,7 +420,7 @@ export class CoderAgent extends Agent {
     raw: string,
     _input: AgentInput
   ): Promise<AgentResult> {
-    const json = JSON.parse(this.extractJSON(raw));
+    const json = this.parseJSONFromLLM(raw, "coder fallback");
     const artifacts: Artifact[] = [];
     if (json.files && Array.isArray(json.files)) {
       for (const file of json.files) {

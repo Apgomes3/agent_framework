@@ -27,9 +27,13 @@ export async function loadConfig(
   // Try loading config file
   const filePath = configPath ?? CONFIG_FILE;
   if (existsSync(filePath)) {
-    const raw = await readFile(filePath, "utf-8");
-    const fileConfig = JSON.parse(raw) as Partial<AgentFrameworkConfig>;
-    config = mergeConfig(config, fileConfig);
+    try {
+      const raw = await readFile(filePath, "utf-8");
+      const fileConfig = JSON.parse(raw) as Partial<AgentFrameworkConfig>;
+      config = mergeConfig(config, fileConfig);
+    } catch (err) {
+      throw new Error(`Failed to parse config file "${filePath}": ${(err as Error).message}`);
+    }
   }
 
   // Override with env vars
@@ -69,7 +73,47 @@ export async function loadConfig(
     config.defaults.projectsDir = projectsDir;
   }
 
+  // Validate that at least the default provider has an API key
+  validateConfig(config);
+
   return config;
+}
+
+/**
+ * Validate config has usable API keys for the providers it references.
+ * Throws early with a clear message instead of failing mid-pipeline.
+ */
+function validateConfig(config: AgentFrameworkConfig): void {
+  const defaultProvider = config.defaults.provider;
+  const providerConfig = config.providers[defaultProvider];
+
+  if (!providerConfig?.apiKey) {
+    const envVarMap: Record<LLMProvider, string> = {
+      openai: "OPENAI_API_KEY",
+      anthropic: "ANTHROPIC_API_KEY",
+      gemini: "GOOGLE_API_KEY",
+    };
+    throw new Error(
+      `No API key for default provider "${defaultProvider}". ` +
+      `Set ${envVarMap[defaultProvider]} in your environment or .env file.\n` +
+      `See .env.example for the required variables.`
+    );
+  }
+
+  // Warn about agent-specific providers that lack keys
+  for (const [role, agentModel] of Object.entries(config.agentModels)) {
+    if (agentModel && !config.providers[agentModel.provider]?.apiKey) {
+      const envVarMap: Record<LLMProvider, string> = {
+        openai: "OPENAI_API_KEY",
+        anthropic: "ANTHROPIC_API_KEY",
+        gemini: "GOOGLE_API_KEY",
+      };
+      throw new Error(
+        `Agent "${role}" is configured to use provider "${agentModel.provider}" but no API key is set. ` +
+        `Set ${envVarMap[agentModel.provider]} in your environment.`
+      );
+    }
+  }
 }
 
 function mergeConfig(

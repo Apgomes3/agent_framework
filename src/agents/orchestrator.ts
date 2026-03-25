@@ -112,8 +112,8 @@ export class OrchestratorAgent extends Agent {
         maxTokens: 2048,
         responseFormat: "json",
       });
-      const parsed = JSON.parse(this.extractJSON(response.content));
-      questions = parsed.questions ?? [];
+      const parsed = this.parseJSONFromLLM(response.content, "interview questions");
+      questions = (parsed.questions as Array<{ id: string; question: string; default: string }>) ?? [];
     } catch (err) {
       logger.warn(`Interview question generation failed: ${err}`);
       return input;
@@ -180,7 +180,7 @@ export class OrchestratorAgent extends Agent {
     raw: string,
     _input: AgentInput
   ): Promise<AgentResult> {
-    const json = JSON.parse(this.extractJSON(raw));
+    const json = this.parseJSONFromLLM(raw, "orchestrator plan");
 
     // Validate task breakdown with Zod
     const taskBreakdown = TaskBreakdownSchema.parse(json.taskBreakdown);

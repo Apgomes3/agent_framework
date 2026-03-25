@@ -175,11 +175,18 @@ const STACK_REGISTRY = new Map<string, TechStack>([
 ]);
 
 /**
- * Get a tech stack by ID. Falls back to "react-fluent" if not found.
+ * Get a tech stack by ID. Falls back to "react-fluent" if not found,
+ * but warns when an unknown ID is provided.
  */
 export function getTechStack(id?: string): TechStack {
   if (!id) return REACT_FLUENT;
-  return STACK_REGISTRY.get(id) ?? REACT_FLUENT;
+  const stack = STACK_REGISTRY.get(id);
+  if (!stack) {
+    const available = Array.from(STACK_REGISTRY.keys()).join(", ");
+    console.warn(`[tech-stack] Unknown stack "${id}" — falling back to "react-fluent". Available: ${available}`);
+    return REACT_FLUENT;
+  }
+  return stack;
 }
 
 /**

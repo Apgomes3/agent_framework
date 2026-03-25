@@ -29,25 +29,45 @@ export abstract class Agent {
 
     const messages = this.buildMessages(input);
 
-    // Inject memory context (compact prior-stage summary) into the system prompt
-    if (input.memoryContext && messages.length > 0 && messages[0].role === "system") {
-      messages[0] = {
-        ...messages[0],
-        content: messages[0].content + input.memoryContext,
-      };
+    // Inject memory context and lessons into system prompt with token budget
+    if (messages.length > 0 && messages[0].role === "system") {
+      const options = this.getLLMOptions();
+      const maxOutputTokens = options.maxTokens ?? 4096;
+      // Reserve ~80% of a 128k context window for content, minus output tokens
+      const TOKEN_BUDGET = 100_000 - maxOutputTokens;
+      const baseTokens = this.estimateTokens(messages[0].content);
+      const userTokens = messages.slice(1).reduce((sum, m) => sum + this.estimateTokens(m.content), 0);
+      let remaining = TOKEN_BUDGET - baseTokens - userTokens;
+
+      if (input.memoryContext && remaining > 0) {
+        const memoryTokens = this.estimateTokens(input.memoryContext);
+        if (memoryTokens <= remaining) {
+          messages[0] = { ...messages[0], content: messages[0].content + input.memoryContext };
+          remaining -= memoryTokens;
+        } else {
+          // Truncate memory context to fit budget
+          const truncated = input.memoryContext.slice(0, remaining * 4);
+          messages[0] = { ...messages[0], content: messages[0].content + truncated + "\n[memory truncated]" };
+          remaining = 0;
+          logger.debug(`[${this.role}] Memory context truncated to fit token budget`);
+        }
+      }
+
+      if (input.lessons && remaining > 0) {
+        const lessonTokens = this.estimateTokens(input.lessons);
+        if (lessonTokens <= remaining) {
+          messages[0] = { ...messages[0], content: messages[0].content + input.lessons };
+        } else {
+          const truncated = input.lessons.slice(0, remaining * 4);
+          messages[0] = { ...messages[0], content: messages[0].content + truncated + "\n[lessons truncated]" };
+          logger.debug(`[${this.role}] Lessons truncated to fit token budget`);
+        }
+      }
     }
 
-    // Inject lessons learned into the system prompt
-    if (input.lessons && messages.length > 0 && messages[0].role === "system") {
-      messages[0] = {
-        ...messages[0],
-        content: messages[0].content + input.lessons,
-      };
-    }
+    const llmOptions = this.getLLMOptions();
 
-    const options = this.getLLMOptions();
-
-    const response = await this.llmClient.chat(messages, options);
+    const response = await this.llmClient.chat(messages, llmOptions);
     logger.info(
       `[${this.role}] LLM responded (${response.usage.totalTokens} tokens)`
     );
@@ -85,6 +105,32 @@ export abstract class Agent {
    */
   protected getLLMOptions(): LLMOptions {
     return { temperature: 0.7, maxTokens: 4096 };
+  }
+
+  /**
+   * Rough token estimate: ~4 characters per token on average.
+   */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Extract and parse JSON from an LLM response in one step.
+   * Wraps extractJSON + JSON.parse with a descriptive error on failure.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  protected parseJSONFromLLM(raw: string, context?: string): Record<string, any> {
+    const jsonStr = this.extractJSON(raw);
+    try {
+      return JSON.parse(jsonStr);
+    } catch (err) {
+      const snippet = jsonStr.slice(0, 300);
+      const ctx = context ? ` (${context})` : "";
+      throw new Error(
+        `[${this.role}] Failed to parse LLM JSON response${ctx}: ${(err as Error).message}\n` +
+        `Response snippet: ${snippet}...`
+      );
+    }
   }
 
   /**

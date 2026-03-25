@@ -4,6 +4,54 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { LLMClient, LLMMessage, LLMOptions, LLMProvider, LLMResponse } from "./types.js";
 import { logger } from "../utils/logger.js";
 
+// ── Retry helper ───────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+/**
+ * Retries an async operation with exponential backoff.
+ * Retries on rate-limit (429), server errors (5xx), and network/timeout errors.
+ */
+async function withRetry<T>(
+  provider: string,
+  fn: () => Promise<T>,
+  maxRetries = MAX_RETRIES
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      lastError = err;
+      if (attempt === maxRetries || !isRetryable(err)) {
+        throw err;
+      }
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 500;
+      logger.warn(`[${provider}] Request failed (attempt ${attempt + 1}/${maxRetries + 1}): ${(err as Error).message ?? err} — retrying in ${Math.round(delay)}ms`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+function isRetryable(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  // HTTP status-based retry (OpenAI/Anthropic SDK errors expose status)
+  const status = (err as { status?: number }).status;
+  if (status === 429 || (status && status >= 500)) return true;
+  // Network / timeout errors
+  const code = (err as { code?: string }).code;
+  if (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "ENOTFOUND" || code === "UND_ERR_CONNECT_TIMEOUT") return true;
+  const message = (err as Error).message?.toLowerCase() ?? "";
+  if (message.includes("rate limit") || message.includes("overloaded") || message.includes("timeout") || message.includes("network")) return true;
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ── OpenAI Adapter ─────────────────────────────────────────
 
 export class OpenAIClient implements LLMClient {
@@ -17,6 +65,7 @@ export class OpenAIClient implements LLMClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMOptions): Promise<LLMResponse> {
+    return withRetry("OpenAI", async () => {
     const model = options?.model ?? this.defaultModel;
     logger.debug(`OpenAI request: model=${model}, messages=${messages.length}`);
 
@@ -45,6 +94,7 @@ export class OpenAIClient implements LLMClient {
       },
       model,
     };
+    });
   }
 }
 
@@ -61,6 +111,7 @@ export class AnthropicClient implements LLMClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMOptions): Promise<LLMResponse> {
+    return withRetry("Anthropic", async () => {
     const model = options?.model ?? this.defaultModel;
     logger.debug(`Anthropic request: model=${model}, messages=${messages.length}`);
 
@@ -98,6 +149,7 @@ export class AnthropicClient implements LLMClient {
       },
       model,
     };
+    });
   }
 }
 
@@ -114,6 +166,7 @@ export class GeminiClient implements LLMClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMOptions): Promise<LLMResponse> {
+    return withRetry("Gemini", async () => {
     const model = options?.model ?? this.defaultModel;
     logger.debug(`Gemini request: model=${model}, messages=${messages.length}`);
 
@@ -165,6 +218,7 @@ export class GeminiClient implements LLMClient {
       },
       model,
     };
+    });
   }
 }
 

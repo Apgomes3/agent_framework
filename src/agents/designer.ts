@@ -109,7 +109,7 @@ export class DesignerAgent extends Agent {
     raw: string,
     _input: AgentInput
   ): Promise<AgentResult> {
-    const json = JSON.parse(this.extractJSON(raw));
+    const json = this.parseJSONFromLLM(raw, "designer artifacts");
 
     const artifacts: Artifact[] = [];
 
