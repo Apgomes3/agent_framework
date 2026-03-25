@@ -1,0 +1,27 @@
+{
+  "providers": {
+    "openai": {
+      "apiKey": "",
+      "defaultModel": "gpt-5.3-codex"
+    },
+    "anthropic": {
+      "apiKey": "",
+      "defaultModel": "claude-sonnet-4-20250514"
+    },
+    "gemini": {
+      "apiKey": "",
+      "defaultModel": "gemini-3.1"
+    }
+  },
+  "agentModels": {
+    "orchestrator": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+    "designer": { "provider": "gemini", "model": "gemini-3.1" },
+    "coder": { "provider": "openai", "model": "gpt-5.3-codex" },
+    "qa": { "provider": "anthropic", "model": "claude-opus-4-20250514" }
+  },
+  "defaults": {
+    "provider": "anthropic",
+    "maxRetries": 3,
+    "outputDir": "./output"
+  }
+}
